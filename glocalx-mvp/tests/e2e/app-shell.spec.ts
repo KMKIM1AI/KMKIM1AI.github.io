@@ -1,0 +1,235 @@
+import { expect, test, type Page } from "@playwright/test"
+import { writeFileSync } from "node:fs"
+
+import { openDatabase } from "../../src/server/db/sqlite"
+import { resetE2eDatabase } from "./global-setup"
+
+function resetFirstTimeE2eDatabase(): void {
+  resetE2eDatabase()
+  const database = openDatabase()
+  try {
+    database
+      .prepare("UPDATE stores SET onboarding_status = ? WHERE id = ?")
+      .run("NOT_STARTED", "demo-store")
+  } finally {
+    database.close()
+  }
+}
+
+async function expectDashboardLanding(page: Page): Promise<void> {
+  await expect(
+    page.getByRole("heading", { name: "성과 대시보드" })
+  ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "성과 대시보드" })
+  ).toHaveAttribute("aria-current", "page")
+}
+
+async function completeOnboarding(page: Page): Promise<void> {
+  await page
+    .getByRole("textbox", { name: "네이버 정보", exact: true })
+    .fill("https://naver.me/mybrunchcafe")
+  await page.getByRole("button", { name: "네이버 정보 제출" }).click()
+  await expect(page.getByText("브런치모먼트 홍대점")).toBeVisible()
+  await page.getByRole("button", { exact: true, name: "매장 확인" }).click()
+  await page
+    .getByRole("textbox", { name: "네이버 정보", exact: true })
+    .fill("평일 9-6이에요")
+  await page.getByRole("button", { name: "네이버 정보 제출" }).click()
+  await expect(page.getByRole("textbox", { name: "영업시간" })).toHaveValue(
+    "평일 09:00-18:00"
+  )
+  await page.getByRole("button", { name: "매장 정보 확인" }).click()
+  await page.getByRole("button", { name: "다음: GBP 세팅 확인" }).click()
+  await expect(page.getByText("인증 대기", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "대시보드로 이동" }).click()
+  await expect(page).toHaveURL(/\/app/)
+  await expectDashboardLanding(page)
+}
+
+test.beforeEach(({ page }, testInfo) => {
+  void page
+  testInfo.setTimeout(60_000)
+  resetFirstTimeE2eDatabase()
+})
+
+test("flow navigation keyboard changes the active step", async ({ page }) => {
+  await page.context().clearCookies()
+  await page.goto("/")
+  await page.getByRole("button", { name: "이메일로 시작" }).click()
+  await completeOnboarding(page)
+
+  const dashboardTab = page.getByRole("button", { name: "성과 대시보드" })
+  const postingTab = page.getByRole("button", { name: "다채널 포스팅" })
+
+  await expect(dashboardTab).toHaveAttribute("aria-current", "page")
+  await postingTab.click()
+  await expect(postingTab).toHaveAttribute("aria-current", "page")
+  await expect(
+    page.getByText("이미지와 홍보 의도를 먼저 분석하면")
+  ).toBeVisible()
+
+  writeFileSync(
+    ".omo/evidence/task-3-bottom-nav-keyboard.txt",
+    `active=${await postingTab.getAttribute("aria-current")}\n`
+  )
+})
+
+test("bottom chat composer accepts typed text", async ({ page }) => {
+  await page.context().clearCookies()
+  await page.goto("/")
+  await page.getByRole("button", { name: "이메일로 시작" }).click()
+  await completeOnboarding(page)
+
+  await page.getByRole("button", { name: "다채널 포스팅" }).click()
+  await expect(
+    page.getByRole("button", { name: "다채널 포스팅" })
+  ).toHaveAttribute("aria-current", "page")
+  const composer = page.getByRole("textbox", { name: "메시지 입력" })
+  await composer.fill("이번 주말 신메뉴를 홍보하고 싶어요")
+
+  await expect(composer).toHaveValue("이번 주말 신메뉴를 홍보하고 싶어요")
+})
+
+test("app onboarding quick replies drive the bottom composer", async ({
+  page,
+}) => {
+  await page.context().clearCookies()
+  await page.goto("/")
+  await page.getByRole("button", { name: "이메일로 시작" }).click()
+  await completeOnboarding(page)
+
+  await page.getByRole("button", { name: "온보딩" }).click()
+  const composer = page.getByRole("textbox", { name: "메시지 입력" })
+
+  await page
+    .getByRole("button", { name: "네이버 플레이스 링크 붙여넣기" })
+    .click()
+  await expect(composer).toBeFocused()
+  await expect(composer).toHaveValue("https://naver.me/mybrunchcafe")
+
+  await page.getByRole("button", { name: "상호명으로 검색" }).click()
+  await expect(composer).toHaveValue("브런치모먼트")
+
+  await composer.press("Enter")
+  await expect(page.getByText("브런치모먼트 홍대점")).toBeVisible()
+  await expect(
+    page.getByRole("button", { exact: true, name: "매장 확인" })
+  ).toBeVisible()
+  await expect(
+    page.getByText("영업시간을 알려주세요", { exact: false })
+  ).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "온보딩" })).toHaveAttribute(
+    "aria-current",
+    "page"
+  )
+
+  await page.getByRole("button", { name: "다시 검색" }).click()
+  await expect(composer).toBeFocused()
+  await expect(composer).toHaveValue("")
+  await expect(page.getByText("다시 찾을 상호명이나 네이버 링크")).toBeVisible()
+
+  await composer.fill("https://naver.me/mybrunchcafe")
+  await page.getByRole("button", { name: "전송" }).click()
+  await expect(
+    page.getByText("네이버에서 매장 정보를 찾았습니다.")
+  ).toBeVisible()
+  await page.getByRole("button", { exact: true, name: "매장 확인" }).click()
+  await expect(page.getByRole("button", { name: "온보딩" })).toHaveAttribute(
+    "aria-current",
+    "page"
+  )
+
+  await composer.fill("평일 9-6이에요")
+  await composer.press("Enter")
+  await expect(page.getByRole("textbox", { name: "영업시간" })).toHaveValue(
+    "평일 09:00-18:00"
+  )
+
+  await composer.fill("서울커피")
+  await composer.press("Enter")
+  await expect(page.getByText("서울커피 홍대점")).toBeVisible()
+  await expect(page.getByRole("button", { name: "온보딩" })).toHaveAttribute(
+    "aria-current",
+    "page"
+  )
+})
+
+test("app onboarding keeps Korean composition input and exposes editable store fields", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.context().clearCookies()
+  await page.goto("/")
+  await page.getByRole("button", { name: "이메일로 시작" }).click()
+  await completeOnboarding(page)
+
+  await page.getByRole("button", { name: "온보딩" }).click()
+  const composer = page.getByRole("textbox", { name: "메시지 입력" })
+
+  await composer.dispatchEvent("compositionstart")
+  await composer.fill("떡")
+  await composer.press("Enter")
+  await expect(composer).toHaveValue("떡")
+
+  await composer.dispatchEvent("compositionend")
+  await composer.fill("우빈떡볶이")
+  await page.getByRole("button", { name: "전송" }).click()
+
+  await expect(page.getByText("우빈떡볶이", { exact: true })).toBeVisible()
+  await expect(page.getByText("먼저 전화번호를 알려주세요")).toHaveCount(0)
+  await page.getByRole("button", { exact: true, name: "매장 확인" }).click()
+  const storeName = page.getByRole("textbox", { name: "상호" })
+  await expect(storeName).toBeVisible()
+  await expect(storeName).toHaveValue("우빈떡볶이 홍대점")
+
+  await storeName.fill("우빈떡볶이 신촌점")
+  await expect(storeName).toHaveValue("우빈떡볶이 신촌점")
+
+  await composer.fill("전화번호 01082432196")
+  await page.getByRole("button", { name: "전송" }).click()
+  await expect(page.getByRole("textbox", { name: "전화번호" })).toHaveValue(
+    "01082432196"
+  )
+  await expect(page.getByText("영업시간을 알려주세요")).toBeVisible()
+
+  await composer.fill("평일 12시-6시")
+  await page.getByRole("button", { name: "전송" }).click()
+  await expect(page.getByRole("textbox", { name: "영업시간" })).toHaveValue(
+    "평일 12:00-18:00"
+  )
+
+  await page.getByRole("button", { name: "매장 정보 확인" }).click()
+  await expect(
+    page.getByRole("button", { name: "다음: GBP 세팅 확인" })
+  ).toBeVisible()
+})
+
+test("responsive browser shell keeps controls visible on mobile", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 900 })
+  await page.context().clearCookies()
+  await page.goto("/")
+  await page.getByRole("button", { name: "이메일로 시작" }).click()
+  await completeOnboarding(page)
+
+  await expect(page.getByTestId("app-stage")).toBeVisible()
+  await expect(
+    page.locator(".gx-device-island, .gx-statusbar, .gx-phone-screen")
+  ).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: "성과 대시보드" })
+  ).toHaveAttribute("aria-current", "page")
+
+  const metrics = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }))
+  await page.screenshot({
+    fullPage: true,
+    path: ".omo/evidence/task-3-responsive-mobile-shell.png",
+  })
+
+  expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.innerWidth)
+})
